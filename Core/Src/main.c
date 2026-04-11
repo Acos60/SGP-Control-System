@@ -26,7 +26,7 @@
 /* USER CODE BEGIN Includes */
 #include "encoder.h"
 #include "bsp_uart.h"
-#include "actuator.h"
+#include "Actuator.h"
 #include <string.h>
 #include <stdlib.h>
 #include <main.h>

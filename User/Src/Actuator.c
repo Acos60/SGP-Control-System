@@ -1,4 +1,4 @@
-#include "actuator.h"
+#include "Actuator.h"
 #include "encoder.h"  
 #include <stdio.h>
 #include <math.h>
