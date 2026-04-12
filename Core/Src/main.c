@@ -4,16 +4,6 @@
   * @file           : main.c
   * @brief          : Main program body
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -24,56 +14,46 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "encoder.h"
-#include "bsp_uart.h"
 #include "Actuator.h"
-#include <string.h>
-#include <stdlib.h>
-#include <main.h>
-
+#include "bsp_uart.h"
+#include "control_manager.h"
+#include "encoder.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-Actuator_t acts[6]; // 全局执行器数组
-uint32_t last_print_tick = 0;
-uint32_t timenow = 0;
-
+Actuator_t acts[6];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-// 重定向 printf 函数到 UART
 int fputc(int ch, FILE *f) {
+    (void)f;
     if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE) != RESET) {
         __HAL_UART_CLEAR_OREFLAG(&huart1);
     }
     HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, 10);
     return ch;
 }
-
 /* USER CODE END 0 */
 
 /**
@@ -82,28 +62,9 @@ int fputc(int ch, FILE *f) {
   */
 int main(void)
 {
-
-  /* USER CODE BEGIN 1 */
-
-  /* USER CODE END 1 */
-
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
-  /* Configure the system clock */
   SystemClock_Config();
 
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_TIM3_Init();
@@ -117,64 +78,25 @@ int main(void)
   MX_TIM10_Init();
   MX_TIM11_Init();
   MX_TIM12_Init();
+
   /* USER CODE BEGIN 2 */
   Encoders_Init();
-	UART_Init_Receive();
-	Actuator_Init(&acts[0], &htim9, TIM_CHANNEL_1, M_In1_GPIO_Port, M_In1_Pin, M_In2_GPIO_Port, M_In2_Pin);
-	
-	HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1);
-
-  Actuator_ManualHome(&acts[0], 0);
+  UART_Init_Receive();
+  ControlMgr_Init();
 
   HAL_TIM_Base_Start_IT(&htim6);
-  timenow = HAL_GetTick();
   /* USER CODE END 2 */
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
   while (1)
   {
-		// UART_ProcessCommand();
-
-    // if (new_cmd_flag == 0) { // 处理完指令后同步一次
-    //     acts[0].target_pos = target_pos_all[0];
-    // }
-
-		// if (HAL_GetTick() - last_print_tick >= 500) 
-    //     {
-    //         last_print_tick = HAL_GetTick();
-    //         // 打印 Axis 1 的闭环状态供测试
-    //         printf("A1| Tar:%.1f | Cur:%.1f mm | Vel:%.1f mm/s\r\n", 
-    //                acts[0].target_pos, acts[0].current_pos, acts[0].current_vel);
-    //     }
-    // if (HAL_GPIO_ReadPin(KEY0_GPIO_Port, KEY0_Pin) == GPIO_PIN_RESET) 
-    //     {
-    //         // 伸出
-    //         HAL_GPIO_WritePin(M_In1_GPIO_Port, M_In1_Pin, GPIO_PIN_RESET);
-    //         HAL_GPIO_WritePin(M_In2_GPIO_Port, M_In2_Pin, GPIO_PIN_SET);
-    //         __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 3000); 
-    //     }
-    //     else if (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_RESET)
-    //     {
-    //         // 缩回
-    //         HAL_GPIO_WritePin(M_In1_GPIO_Port, M_In1_Pin, GPIO_PIN_SET);
-    //         HAL_GPIO_WritePin(M_In2_GPIO_Port, M_In2_Pin, GPIO_PIN_RESET);
-    //         __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 3000);
-    //     }
-    //     else 
-    //     {
-    //         // 停止
-    //         __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 0);
-    //         HAL_GPIO_WritePin(M_In1_GPIO_Port, M_In1_Pin, GPIO_PIN_RESET);
-    //         HAL_GPIO_WritePin(M_In2_GPIO_Port, M_In2_Pin, GPIO_PIN_RESET);
-    //     }
-
-        printf("Target,Current:%d,%6.2f,%6.2f,%6.2f,%6.2f\n", HAL_GetTick(), acts[0].target_pos, acts[0].current_pos, acts[0].target_vel, acts[0].current_vel);
+    /* USER CODE BEGIN WHILE */
+    UART_ProcessCommand();
+    // ControlMgr_MainTask();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* USER CODE END 3 */
   }
-  /* USER CODE END 3 */
 }
 
 /**
@@ -186,14 +108,9 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -207,8 +124,6 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -225,23 +140,9 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
     if (htim->Instance == TIM6) {
-        // 获取反馈
-        float current_mm = Encoder_GetPos_mm(0);
-        
-        // 1. 先更新状态
-        Actuator_UpdateStatus(&acts[0], current_mm);
-
-        //test
-        acts[0].target_pos = 30.0f;
-        
-        // 2. 跑位置环（如果只测速度，可以注释掉这一行，手动给 acts[0].target_vel 赋值）
-        Actuator_PositionControl(&acts[0]);
-        
-        // 3. 跑速度环
-        Actuator_VelocityControl(&acts[0]);
+        ControlMgr_Tick10ms();
     }
 }
-
 /* USER CODE END 4 */
 
 /**
@@ -250,27 +151,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
   */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
+  (void)file;
+  (void)line;
 }
 #endif /* USE_FULL_ASSERT */
+

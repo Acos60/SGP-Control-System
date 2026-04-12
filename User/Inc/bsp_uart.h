@@ -1,18 +1,28 @@
-#ifndef __BSP_UART_H
+﻿#ifndef __BSP_UART_H
 #define __BSP_UART_H
 
 #include "usart.h"
-#include <stdio.h>
+#include <stdint.h>
 
-// UART 接收相关变量
-extern char rx_buffer[64];
+/* 串口接收缓存（以 '\\n' 或 '\\r' 结束一条命令） */
+extern char rx_buffer[96];
+/* USART 中断接收的当前字节 */
 extern uint8_t rx_data;
+/* 新命令就绪标志：1=有待处理命令，0=无 */
 extern volatile uint8_t new_cmd_flag;
 
-extern float target_pos_all[6];
-
-// 初始化 UART 接收中断
+/**
+ * @brief 初始化 USART1 中断接收（单字节循环接收）
+ * @param 无
+ * @return 无
+ */
 void UART_Init_Receive(void);
+
+/**
+ * @brief 解析并处理一条串口命令
+ * @param 无
+ * @return 无
+ */
 void UART_ProcessCommand(void);
 
-#endif /* __BSP_UART_H */
+#endif

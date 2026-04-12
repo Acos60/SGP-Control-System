@@ -1,154 +1,162 @@
-#include "Actuator.h"
-#include "encoder.h"  
-#include <stdio.h>
+﻿#include "Actuator.h"
+#include "encoder.h"
 #include <math.h>
+#include <stdio.h>
 
-void Actuator_Init(Actuator_t *act, TIM_HandleTypeDef *htim, uint32_t ch, 
-                  GPIO_TypeDef *p1, uint16_t n1, GPIO_TypeDef *p2, uint16_t n2) {
+/* 控制周期（秒），与 TIM6 的 10ms 中断一致 */
+#define CONTROL_DT_S 0.01f
+
+/* 初始化执行器对象并绑定硬件资源 */
+void Actuator_Init(Actuator_t *act, TIM_HandleTypeDef *htim, uint32_t ch,
+                   GPIO_TypeDef *p1, uint16_t n1, GPIO_TypeDef *p2, uint16_t n2) {
+    int i;
+
     act->htim_pwm = htim;
     act->pwm_channel = ch;
-    act->dir_port_in1 = p1; act->dir_pin_in1 = n1;
-    act->dir_port_in2 = p2; act->dir_pin_in2 = n2;
+    act->dir_port_in1 = p1;
+    act->dir_pin_in1 = n1;
+    act->dir_port_in2 = p2;
+    act->dir_pin_in2 = n2;
 
-    // 清空速度缓冲区
-    for (int i = 0; i < VEL_WINDOW_SIZE; i++) {
+    act->target_pos = 0.0f;
+    act->target_vel = 0.0f;
+    act->current_pos = 0.0f;
+    act->current_vel = 0.0f;
+    act->last_pos = 0.0f;
+
+    for (i = 0; i < VEL_WINDOW_SIZE; i++) {
         act->vel_buffer[i] = 0.0f;
     }
     act->vel_idx = 0;
+
+    act->kp_pos = 6.5f;
+    act->kp_vel = 100.0f;
+    act->ki_vel = 18.0f;
+    act->kd_vel = 5.0f;
+    act->vel_limit = 22.0f;
     act->integral_vel = 0.0f;
     act->last_vel_error = 0.0f;
     act->d_term_filt = 0.0f;
 
-    // 初始化 PID 默认参数 (需根据 Stewart 平台实际负载调试)
-    act->kp_pos = 6.5f; 
-    act->kp_vel = 100.0f; act->ki_vel = 18.0f;
-    act->vel_limit = 22.0f; // 限制最大速度 50mm/s
-    act->kd_vel = 5.0f;
+    act->cmd_in1 = 0u;
+    act->cmd_in2 = 0u;
+    act->cmd_pwm = 0u;
 }
 
-/**
- * @brief 更新执行器的物理状态，并对速度进行窗口平滑处理
- */
+/* 根据位置反馈更新状态量（位置、速度） */
 void Actuator_UpdateStatus(Actuator_t *act, float feedback_pos) {
-    // 1. 更新位置
+    int i;
+    float vel_sum;
+    float raw_vel;
+
     act->current_pos = feedback_pos;
-    
-    // 2. 计算原始瞬时速度 (Raw Velocity)
-    float raw_vel = (act->current_pos - act->last_pos) / 0.01f;
+
+    raw_vel = (act->current_pos - act->last_pos) / CONTROL_DT_S;
     act->last_pos = act->current_pos;
 
-    // 3. 滑动窗口滤波逻辑
-    act->vel_buffer[act->vel_idx] = raw_vel;      // 将新速度存入缓冲区
-    act->vel_idx = (act->vel_idx + 1) % VEL_WINDOW_SIZE; // 移动索引（环形）
+    act->vel_buffer[act->vel_idx] = raw_vel;
+    act->vel_idx = (uint8_t)((act->vel_idx + 1u) % VEL_WINDOW_SIZE);
 
-    // 4. 计算窗口内所有样本的平均值
-    float vel_sum = 0;
-    for (int i = 0; i < VEL_WINDOW_SIZE; i++) {
+    vel_sum = 0.0f;
+    for (i = 0; i < VEL_WINDOW_SIZE; i++) {
         vel_sum += act->vel_buffer[i];
     }
-    
-    // 最终输出平滑后的速度
+
     act->current_vel = vel_sum / (float)VEL_WINDOW_SIZE;
 }
-/**
- * @brief 位置闭环控制
- */
+
+/* 位置环：由位置误差生成目标速度并限幅 */
 void Actuator_PositionControl(Actuator_t *act) {
     float pos_error = act->target_pos - act->current_pos;
-    
-    // 计算目标速度
-    act->target_vel = pos_error * act->kp_pos;
-    
-    // 速度限幅
-    if (act->target_vel > act->vel_limit) act->target_vel = act->vel_limit;
-    if (act->target_vel < -act->vel_limit) act->target_vel = -act->vel_limit;
 
-    if (fabs(pos_error) < 0.1f) { 
+    act->target_vel = pos_error * act->kp_pos;
+
+    if (act->target_vel > act->vel_limit) {
+        act->target_vel = act->vel_limit;
+    }
+    if (act->target_vel < -act->vel_limit) {
+        act->target_vel = -act->vel_limit;
+    }
+
+    if (fabsf(pos_error) < 0.1f) {
         act->target_vel = 0.0f;
-        act->integral_vel = 0.0f; // 关键：进死区后清空速度环积分，防止“憋大招”
-        return;
+        act->integral_vel = 0.0f;
     }
 }
 
-/**
- * @brief 速度闭环控制并驱动硬件
- */
+/* 速度环：计算方向与 PWM 命令（仅写命令缓存） */
 void Actuator_VelocityControl(Actuator_t *act) {
-    // 1. 计算速度误差
-    float vel_error = act->target_vel - act->current_vel;
-    
-    // 2. 积分计算与抗饱和限幅
-    act->integral_vel += vel_error * 1.0f;
-    if (act->integral_vel > 200.0f) act->integral_vel = 200.0f;
-    if (act->integral_vel < -200.0f) act->integral_vel = -200.0f;
-    
-    // 3. 计算控制量 U
-    // 1. P 项
-    float p_term = vel_error * act->kp_vel;
+    float vel_error;
+    float p_term;
+    float i_term;
+    float d_term_raw;
+    float d_term;
+    float control_u;
+    float abs_u;
 
-    // 2. I 项
-    float i_term = act->integral_vel * act->ki_vel;
+    vel_error = act->target_vel - act->current_vel;
 
-    // 3. D 项 (带简单低通滤波)
-    float d_term_raw = (vel_error - act->last_vel_error) / 0.01f;
+    act->integral_vel += vel_error * CONTROL_DT_S;
+    if (act->integral_vel > 200.0f) {
+        act->integral_vel = 200.0f;
+    }
+    if (act->integral_vel < -200.0f) {
+        act->integral_vel = -200.0f;
+    }
+
+    p_term = vel_error * act->kp_vel;
+    i_term = act->integral_vel * act->ki_vel;
+
+    d_term_raw = (vel_error - act->last_vel_error) / CONTROL_DT_S;
     act->last_vel_error = vel_error;
 
-    // 低通滤波：新的 D = 0.8 * 旧的 D + 0.2 * 原始计算 D
-    // 目的是滤掉编码器量化跳变产生的毛刺
     act->d_term_filt = (act->d_term_filt * 0.8f) + (d_term_raw * 0.2f);
-    float d_term = act->d_term_filt * act->kd_vel;
+    d_term = act->d_term_filt * act->kd_vel;
 
-    // 最终输出
-    float control_u = p_term + i_term + d_term;
+    control_u = p_term + i_term + d_term;
 
-    // 4. 硬件映射逻辑
-    uint16_t final_pwm = 0;
-    
-    // 设定微小控制死区，防止电机在静止时发出滋滋声
-    if (fabs(control_u) > 100.0f) {
-        // 方向判定
-        if (control_u > 0) { // 伸出
-            HAL_GPIO_WritePin(act->dir_port_in1, act->dir_pin_in1, GPIO_PIN_RESET);
-            HAL_GPIO_WritePin(act->dir_port_in2, act->dir_pin_in2, GPIO_PIN_SET);
-        } else { // 缩回
-            HAL_GPIO_WritePin(act->dir_port_in1, act->dir_pin_in1, GPIO_PIN_SET);
-            HAL_GPIO_WritePin(act->dir_port_in2, act->dir_pin_in2, GPIO_PIN_RESET);
+    if (fabsf(control_u) > 100.0f) {
+        if (control_u > 0.0f) {
+            act->cmd_in1 = 1u;
+            act->cmd_in2 = 0u;
+        } else {
+            act->cmd_in1 = 0u;
+            act->cmd_in2 = 1u;
         }
-        
-        // 1200 - 4198 PWM 映射
-        float abs_u = fabs(control_u);
-        if (abs_u > 2990.0f) abs_u = 2990.0f; 
-        final_pwm = (uint16_t)(PWM_MIN + abs_u);
-    } else {
-        // 停止输出
-        HAL_GPIO_WritePin(act->dir_port_in1, act->dir_pin_in1, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(act->dir_port_in2, act->dir_pin_in2, GPIO_PIN_RESET);
-        final_pwm = 0;
-    }
 
-    // 5. 写入定时器
-    __HAL_TIM_SET_COMPARE(act->htim_pwm, act->pwm_channel, final_pwm);
+        abs_u = fabsf(control_u);
+        if (abs_u > (PWM_MAX - PWM_MIN)) {
+            abs_u = (PWM_MAX - PWM_MIN);
+        }
+        act->cmd_pwm = (uint16_t)(PWM_MIN + abs_u);
+    } else {
+        Actuator_SetBrakeCommand(act);
+    }
 }
 
-/**
- * @brief 单轴回零函数（阻塞式）
- * @param act: 执行器结构体指针
- * @param axis_idx: 轴索引 (仅用于打印和读取编码器)
- */
+/* 将命令真正写入硬件 */
+void Actuator_WriteOutput(Actuator_t *act, uint8_t in1, uint8_t in2, uint16_t pwm) {
+    HAL_GPIO_WritePin(act->dir_port_in1, act->dir_pin_in1, in1 ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(act->dir_port_in2, act->dir_pin_in2, in2 ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    __HAL_TIM_SET_COMPARE(act->htim_pwm, act->pwm_channel, pwm);
+}
+
+/* 将命令设置为停车/刹车（00 + PWM=0） */
+void Actuator_SetBrakeCommand(Actuator_t *act) {
+    act->cmd_in1 = 0u;
+    act->cmd_in2 = 0u;
+    act->cmd_pwm = 0u;
+}
+
+/* 阻塞式单轴回零（保留旧接口） */
 void Actuator_ManualHome(Actuator_t *act, uint8_t axis_idx) {
     int16_t last_pulse = 0;
     uint16_t stall_count = 0;
 
-    printf("Axis %d Homing start...\r\n", axis_idx + 1);
+    printf("Axis %d Homing start...\r\n", axis_idx + 1u);
 
-    // 1. 设置方向为“缩回” 
-    HAL_GPIO_WritePin(act->dir_port_in1, act->dir_pin_in1, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(act->dir_port_in2, act->dir_pin_in2, GPIO_PIN_RESET);
+    Actuator_WriteOutput(act, 0u, 1u, 2200u);
 
-    // 2. 输出一个低速安全占空比
-    __HAL_TIM_SET_COMPARE(act->htim_pwm, act->pwm_channel, 2200);
-
-    // 3. 循环监测
     while (1) {
         int16_t current_pulse = Encoder_GetRawCount(axis_idx);
 
@@ -159,18 +167,15 @@ void Actuator_ManualHome(Actuator_t *act, uint8_t axis_idx) {
             stall_count++;
         }
 
-        if (stall_count > 20) break; // 约 200ms 不动则停止
+        if (stall_count > 20u) {
+            break;
+        }
 
-        HAL_Delay(10); 
+        HAL_Delay(10);
     }
 
-    // 4. 停止电机
-    __HAL_TIM_SET_COMPARE(act->htim_pwm, act->pwm_channel, 0);
-    HAL_GPIO_WritePin(act->dir_port_in1, act->dir_pin_in1, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(act->dir_port_in2, act->dir_pin_in2, GPIO_PIN_RESET);
-
-    // 5. 清空硬件编码器
+    Actuator_WriteOutput(act, 0u, 0u, 0u);
     Encoder_ResetPos(axis_idx);
 
-    printf("Axis %d Homing Done!\r\n", axis_idx + 1);
+    printf("Axis %d Homing Done!\r\n", axis_idx + 1u);
 }
