@@ -246,6 +246,8 @@ static void sync_test_tick_10ms(void) {
         sync_set_ref_len(SYNC_HOME40_LEN_MM);
         if (sync_is_settled()) {
             g_sync_state = SYNC_DONE;
+            set_all_brake_commands();
+            g_mode = SYS_IDLE;
         } else if (g_sync_ticks > g_sync_timeout_ticks) {
             sync_mark_fail();
         }

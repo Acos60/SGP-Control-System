@@ -1,29 +1,26 @@
 ﻿#include "homing_manager.h"
 #include "encoder.h"
 
-/* 回零时的搜索 PWM 命令 */
-#define HOME_SEEK_PWM 2200u
-/* 判定停滞所需连续 tick 数 */
+/* 回零方向与 Actuator_ManualHome 保持一致：IN1=0, IN2=1 */
+#define HOME_SEEK_IN1 0u
+#define HOME_SEEK_IN2 1u
+/* 回零时的搜索 PWM 命令，与旧阻塞回零流程保持一致 */
+#define HOME_SEEK_PWM 3500u
+/* 启动宽限 tick 数，避免刚启动或机械间隙阶段被误判为停滞 */
+#define HOME_STARTUP_IGNORE_TICKS 20u
+/* 判定停滞所需连续 tick 数，与旧阻塞回零流程保持一致 */
 #define HOME_STALL_TICKS 20u
-/* 停滞二次确认 tick 数 */
-#define HOME_VERIFY_TICKS 8u
 /* 回零超时阈值 */
 #define HOME_TIMEOUT_TICKS 1200u
-/* 判定有效移动的最小编码器变化量 */
-#define HOME_MIN_MOVE_COUNTS 8
 
 static HomeAxisState_e g_state[HOME_AXIS_NUM];
 static uint16_t g_stall_ticks[HOME_AXIS_NUM];
-static uint16_t g_verify_ticks[HOME_AXIS_NUM];
+static uint16_t g_startup_ticks[HOME_AXIS_NUM];
 static uint16_t g_seek_ticks[HOME_AXIS_NUM];
-static int16_t g_start_cnt[HOME_AXIS_NUM];
 static int16_t g_last_cnt[HOME_AXIS_NUM];
 static bool g_busy = false;
 static bool g_done = false;
 static bool g_failed = false;
-
-/* 计算 int32 绝对值 */
-static int32_t abs32(int32_t v) { return (v < 0) ? -v : v; }
 
 /* 初始化回零上下文 */
 void Homing_Init(void) {
@@ -31,9 +28,8 @@ void Homing_Init(void) {
     for (i = 0; i < HOME_AXIS_NUM; i++) {
         g_state[i] = HOME_IDLE;
         g_stall_ticks[i] = 0u;
-        g_verify_ticks[i] = 0u;
+        g_startup_ticks[i] = 0u;
         g_seek_ticks[i] = 0u;
-        g_start_cnt[i] = 0;
         g_last_cnt[i] = 0;
     }
     g_busy = false;
@@ -47,10 +43,9 @@ void Homing_StartParallel(void) {
     for (i = 0; i < HOME_AXIS_NUM; i++) {
         g_state[i] = HOME_START;
         g_stall_ticks[i] = 0u;
-        g_verify_ticks[i] = 0u;
+        g_startup_ticks[i] = 0u;
         g_seek_ticks[i] = 0u;
-        g_start_cnt[i] = Encoder_GetRawCount(i);
-        g_last_cnt[i] = g_start_cnt[i];
+        g_last_cnt[i] = Encoder_GetRawCount(i);
     }
     g_busy = true;
     g_done = false;
@@ -82,13 +77,12 @@ void Homing_Tick10ms(Actuator_t acts[HOME_AXIS_NUM]) {
 
         switch (g_state[i]) {
         case HOME_START:
-            g_start_cnt[i] = cnt;
             g_last_cnt[i] = cnt;
             g_stall_ticks[i] = 0u;
-            g_verify_ticks[i] = 0u;
+            g_startup_ticks[i] = 0u;
             g_seek_ticks[i] = 0u;
-            acts[i].cmd_in1 = 1u;
-            acts[i].cmd_in2 = 0u;
+            acts[i].cmd_in1 = HOME_SEEK_IN1;
+            acts[i].cmd_in2 = HOME_SEEK_IN2;
             acts[i].cmd_pwm = HOME_SEEK_PWM;
             g_state[i] = HOME_SEEK;
             all_done = false;
@@ -96,15 +90,8 @@ void Homing_Tick10ms(Actuator_t acts[HOME_AXIS_NUM]) {
 
         case HOME_SEEK:
             g_seek_ticks[i]++;
-            if (cnt != g_last_cnt[i]) {
-                g_stall_ticks[i] = 0u;
-            } else {
-                g_stall_ticks[i]++;
-            }
-            g_last_cnt[i] = cnt;
-
-            acts[i].cmd_in1 = 1u;
-            acts[i].cmd_in2 = 0u;
+            acts[i].cmd_in1 = HOME_SEEK_IN1;
+            acts[i].cmd_in2 = HOME_SEEK_IN2;
             acts[i].cmd_pwm = HOME_SEEK_PWM;
 
             if (g_seek_ticks[i] > HOME_TIMEOUT_TICKS) {
@@ -113,32 +100,22 @@ void Homing_Tick10ms(Actuator_t acts[HOME_AXIS_NUM]) {
                 break;
             }
 
-            if (g_stall_ticks[i] >= HOME_STALL_TICKS) {
-                if (abs32((int32_t)cnt - (int32_t)g_start_cnt[i]) >= HOME_MIN_MOVE_COUNTS) {
-                    g_verify_ticks[i] = 0u;
-                    g_state[i] = HOME_VERIFY_STALL;
-                } else {
-                    g_state[i] = HOME_FAIL;
-                    g_failed = true;
-                }
-            }
-            all_done = false;
-            break;
-
-        case HOME_VERIFY_STALL:
-            if (cnt == g_last_cnt[i]) {
-                g_verify_ticks[i]++;
-            } else {
-                g_state[i] = HOME_SEEK;
+            if (g_startup_ticks[i] < HOME_STARTUP_IGNORE_TICKS) {
+                g_startup_ticks[i]++;
                 g_stall_ticks[i] = 0u;
+                g_last_cnt[i] = cnt;
+                all_done = false;
+                break;
             }
-            g_last_cnt[i] = cnt;
 
-            acts[i].cmd_in1 = 1u;
-            acts[i].cmd_in2 = 0u;
-            acts[i].cmd_pwm = HOME_SEEK_PWM;
+            if (cnt != g_last_cnt[i]) {
+                g_stall_ticks[i] = 0u;
+                g_last_cnt[i] = cnt;
+            } else {
+                g_stall_ticks[i]++;
+            }
 
-            if (g_verify_ticks[i] >= HOME_VERIFY_TICKS) {
+            if (g_stall_ticks[i] >= HOME_STALL_TICKS) {
                 g_state[i] = HOME_ZERO_SET;
             }
             all_done = false;
