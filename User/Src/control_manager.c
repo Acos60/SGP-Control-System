@@ -5,30 +5,12 @@
 #include "homing_manager.h"
 #include "safety_manager.h"
 #include "tim.h"
-#include <math.h>
 #include <stdio.h>
 
 #define CTRL_TICK_DT_S 0.01f
 #define CTRL_LEN_MIN_MM 0.0f
 #define CTRL_LEN_MAX_MM 290.0f
 #define CTRL_SPEED_MAX_MM_S 40.0f
-#define SYNC_PI 3.14159265358979323846f
-#define SYNC_HOME40_LEN_MM 40.0f
-#define SYNC_SETTLE_POS_ERR_MM 0.3f
-#define SYNC_SETTLE_VEL_MM_S 0.5f
-#define SYNC_SETTLE_TICKS 30u
-#define SYNC_HOME40_MOVE_TIMEOUT_TICKS 3000u
-#define SYNC_FAIL_TIMEOUT_TICKS 60000u
-
-typedef enum {
-    SYNC_IDLE = 0,
-    SYNC_HOME40_HOMING,
-    SYNC_HOME40_MOVE,
-    SYNC_EXTEND,
-    SYNC_SINE,
-    SYNC_DONE,
-    SYNC_FAIL
-} SyncTestState_e;
 
 typedef struct {
     TIM_HandleTypeDef *tim; /* 该轴 PWM 定时器 */
@@ -56,7 +38,7 @@ static SystemMode_e g_mode = SYS_BOOT;
 /* 状态打印节流时间戳（ms） */
 static uint32_t g_last_print_tick = 0u;
 /* 各轴回零后对应的物理长度（mm，来自测试数据“初始时实际长度”） */
-static const float g_zero_len_mm[CTRL_AXIS_NUM] = {30.0f, 32.0f, 31.0f, 30.0f, 30.0f, 29.5f};
+static const float g_zero_len_mm[CTRL_AXIS_NUM] = {30.0f, 33.5f, 31.7f, 28.0f, 31.0f, 31.0f};
 /* 各轴默认调参结果（来自测试结果.xlsx/Sheet2，轴 3 缺失 KPP 时按同组值 4.0 处理） */
 static const float g_default_kp_pos[CTRL_AXIS_NUM] = {4.0f, 4.0f, 4.0f, 4.0f, 4.0f, 4.0f};
 static const float g_default_kp_vel[CTRL_AXIS_NUM] = {40.0f, 25.0f, 12.0f, 24.0f, 12.0f, 15.0f};
@@ -71,21 +53,7 @@ static const float g_default_ff_gain[CTRL_AXIS_NUM] = {72.5f, 76.0f, 77.0f, 76.5
 static uint8_t g_tune_axis = 0u;
 static float g_tune_target_vel = 0.0f;
 static float g_tune_target_pos = 0.0f;
-/* 6 轴同步测试上下文 */
-static SyncTestState_e g_sync_state = SYNC_IDLE;
-static float g_sync_ref_len = SYNC_HOME40_LEN_MM;
-static float g_sync_end_len = SYNC_HOME40_LEN_MM;
-static float g_sync_speed = 0.0f;
-static float g_sync_center = SYNC_HOME40_LEN_MM;
-static float g_sync_amp = 0.0f;
-static float g_sync_freq = 0.0f;
-static float g_sync_cycles = 0.0f;
-static float g_sync_elapsed_s = 0.0f;
-static float g_sync_max_err = 0.0f;
-static float g_sync_spread = 0.0f;
-static uint16_t g_sync_settle_ticks = 0u;
-static uint32_t g_sync_ticks = 0u;
-static uint32_t g_sync_timeout_ticks = SYNC_FAIL_TIMEOUT_TICKS;
+static bool g_all_homed = false;
 
 /* 将每轴命令经过安全门控后写入硬件 */
 static void apply_outputs_with_safety_gate(void) {
@@ -122,196 +90,13 @@ static bool len_in_range(float len) {
     return (len >= CTRL_LEN_MIN_MM) && (len <= CTRL_LEN_MAX_MM);
 }
 
-static bool speed_in_range(float speed) {
-    return (speed > 0.0f) && (speed <= CTRL_SPEED_MAX_MM_S);
-}
-
-static float axis_len_mm(uint8_t axis) {
-    if (axis >= CTRL_AXIS_NUM) {
-        return 0.0f;
-    }
-    return acts[axis].current_pos + g_zero_len_mm[axis];
-}
-
-static void sync_reset_loop_states(void) {
-    uint8_t i;
-    for (i = 0; i < CTRL_AXIS_NUM; i++) {
-        acts[i].integral_vel = 0.0f;
-        acts[i].last_vel_error = 0.0f;
-        acts[i].d_term_filt = 0.0f;
-    }
-}
-
-static void sync_set_ref_len(float ref_len) {
-    uint8_t i;
-
-    g_sync_ref_len = clampf_local(ref_len, CTRL_LEN_MIN_MM, CTRL_LEN_MAX_MM);
-    for (i = 0; i < CTRL_AXIS_NUM; i++) {
-        acts[i].target_pos = g_sync_ref_len - g_zero_len_mm[i];
-    }
-}
-
-static void sync_update_error_stats(void) {
-    uint8_t i;
-    float min_len;
-    float max_len;
-
-    min_len = axis_len_mm(0u);
-    max_len = min_len;
-    g_sync_max_err = fabsf(min_len - g_sync_ref_len);
-
-    for (i = 1u; i < CTRL_AXIS_NUM; i++) {
-        float len = axis_len_mm(i);
-        float err = fabsf(len - g_sync_ref_len);
-
-        if (len < min_len) {
-            min_len = len;
-        }
-        if (len > max_len) {
-            max_len = len;
-        }
-        if (err > g_sync_max_err) {
-            g_sync_max_err = err;
-        }
-    }
-
-    g_sync_spread = max_len - min_len;
-}
-
-static bool sync_is_settled(void) {
-    uint8_t i;
-    bool settled = true;
-
-    sync_update_error_stats();
-    if (g_sync_max_err > SYNC_SETTLE_POS_ERR_MM) {
-        settled = false;
-    }
-
-    for (i = 0; i < CTRL_AXIS_NUM; i++) {
-        if (fabsf(acts[i].current_vel) > SYNC_SETTLE_VEL_MM_S) {
-            settled = false;
-        }
-    }
-
-    if (settled) {
-        if (g_sync_settle_ticks < SYNC_SETTLE_TICKS) {
-            g_sync_settle_ticks++;
-        }
-    } else {
-        g_sync_settle_ticks = 0u;
-    }
-
-    return g_sync_settle_ticks >= SYNC_SETTLE_TICKS;
-}
-
-static void sync_mark_fail(void) {
-    g_sync_state = SYNC_FAIL;
-    set_all_brake_commands();
-    g_mode = SYS_FAULT;
-}
-
-static void sync_begin_common(SyncTestState_e state, float ref_len, uint32_t timeout_ticks) {
-    g_sync_state = state;
-    g_sync_elapsed_s = 0.0f;
-    g_sync_ticks = 0u;
-    g_sync_settle_ticks = 0u;
-    g_sync_timeout_ticks = timeout_ticks;
-    sync_reset_loop_states();
-    sync_set_ref_len(ref_len);
-    g_mode = SYS_SYNC_TEST;
-}
-
-static void sync_test_tick_10ms(void) {
-    bool reached_end;
-    float duration_s;
-
-    if (g_sync_state == SYNC_IDLE) {
-        return;
-    }
-
-    g_sync_ticks++;
-    g_sync_elapsed_s += CTRL_TICK_DT_S;
-
-    switch (g_sync_state) {
-    case SYNC_HOME40_HOMING:
-        Homing_Tick10ms(acts);
-        if (Homing_IsFailed()) {
-            sync_mark_fail();
-        } else if (Homing_IsDone()) {
-            sync_begin_common(SYNC_HOME40_MOVE, SYNC_HOME40_LEN_MM, SYNC_HOME40_MOVE_TIMEOUT_TICKS);
-        }
-        break;
-
-    case SYNC_HOME40_MOVE:
-        sync_set_ref_len(SYNC_HOME40_LEN_MM);
-        if (sync_is_settled()) {
-            g_sync_state = SYNC_DONE;
-            set_all_brake_commands();
-            g_mode = SYS_IDLE;
-        } else if (g_sync_ticks > g_sync_timeout_ticks) {
-            sync_mark_fail();
-        }
-        break;
-
-    case SYNC_EXTEND:
-        reached_end = false;
-        g_sync_ref_len += g_sync_speed * CTRL_TICK_DT_S;
-        if ((g_sync_speed >= 0.0f) && (g_sync_ref_len >= g_sync_end_len)) {
-            g_sync_ref_len = g_sync_end_len;
-            reached_end = true;
-        } else if ((g_sync_speed < 0.0f) && (g_sync_ref_len <= g_sync_end_len)) {
-            g_sync_ref_len = g_sync_end_len;
-            reached_end = true;
-        }
-
-        sync_set_ref_len(g_sync_ref_len);
-        if (reached_end && sync_is_settled()) {
-            g_sync_state = SYNC_DONE;
-        } else if (g_sync_ticks > g_sync_timeout_ticks) {
-            sync_mark_fail();
-        } else {
-            sync_update_error_stats();
-        }
-        break;
-
-    case SYNC_SINE:
-        duration_s = g_sync_cycles / g_sync_freq;
-        if (g_sync_elapsed_s >= duration_s) {
-            sync_set_ref_len(g_sync_center);
-            if (sync_is_settled()) {
-                g_sync_state = SYNC_DONE;
-            }
-        } else {
-            sync_set_ref_len(g_sync_center + (g_sync_amp * sinf(2.0f * SYNC_PI * g_sync_freq * g_sync_elapsed_s)));
-            sync_update_error_stats();
-        }
-
-        if (g_sync_ticks > g_sync_timeout_ticks) {
-            sync_mark_fail();
-        }
-        break;
-
-    case SYNC_DONE:
-        sync_set_ref_len(g_sync_ref_len);
-        sync_update_error_stats();
-        break;
-
-    case SYNC_FAIL:
-        set_all_brake_commands();
-        break;
-
-    case SYNC_IDLE:
-    default:
-        break;
-    }
-}
-
 /* 控制管理器初始化 */
 void ControlMgr_Init(void) {
     uint8_t i;
 
     Safety_Init();
     Homing_Init();
+    g_all_homed = false;
 
     for (i = 0; i < CTRL_AXIS_NUM; i++) {
         Actuator_Init(&acts[i], g_axis_hw[i].tim, g_axis_hw[i].channel, g_axis_hw[i].in1_port, g_axis_hw[i].in1_pin,
@@ -375,21 +160,12 @@ void ControlMgr_Tick10ms(void) {
         }
         break;
 
-    case SYS_SYNC_TEST:
-        sync_test_tick_10ms();
-        if ((g_mode == SYS_SYNC_TEST) && (g_sync_state != SYNC_HOME40_HOMING) && (g_sync_state != SYNC_FAIL)) {
-            for (i = 0; i < CTRL_AXIS_NUM; i++) {
-                Actuator_PositionControl(&acts[i]);
-                Actuator_VelocityControl(&acts[i]);
-            }
-        }
-        break;
-
     case SYS_HOMING:
         Homing_Tick10ms(acts);
         if (Homing_IsFailed()) {
             g_mode = SYS_FAULT;
         } else if (Homing_IsDone()) {
+            g_all_homed = true;
             for (i = 0; i < CTRL_AXIS_NUM; i++) {
                 /* 统一到 4cm：目标位移 = 40mm - 各轴回零物理长度 */
                 acts[i].target_pos = UNIFIED_START_LEN_MM - g_zero_len_mm[i];
@@ -432,11 +208,7 @@ void ControlMgr_SetRunMode(void) {
         return;
     }
     if ((g_mode == SYS_IDLE) || (g_mode == SYS_RUN_CLOSED_LOOP) || (g_mode == SYS_MANUAL_TEST) ||
-        (g_mode == SYS_TUNE_VEL) || (g_mode == SYS_TUNE_POS) || (g_mode == SYS_SYNC_TEST)) {
-        if (g_sync_state == SYNC_HOME40_HOMING) {
-            Homing_Abort();
-        }
-        g_sync_state = SYNC_IDLE;
+        (g_mode == SYS_TUNE_VEL) || (g_mode == SYS_TUNE_POS)) {
         g_mode = SYS_RUN_CLOSED_LOOP;
     }
 }
@@ -447,11 +219,10 @@ void ControlMgr_SetIdleMode(void) {
         return;
     }
     if ((g_mode == SYS_RUN_CLOSED_LOOP) || (g_mode == SYS_HOMING) || (g_mode == SYS_IDLE) || (g_mode == SYS_MANUAL_TEST) ||
-        (g_mode == SYS_TUNE_VEL) || (g_mode == SYS_TUNE_POS) || (g_mode == SYS_SYNC_TEST)) {
-        if (g_sync_state == SYNC_HOME40_HOMING) {
+        (g_mode == SYS_TUNE_VEL) || (g_mode == SYS_TUNE_POS)) {
+        if (g_mode == SYS_HOMING) {
             Homing_Abort();
         }
-        g_sync_state = SYNC_IDLE;
         g_mode = SYS_IDLE;
     }
 }
@@ -461,7 +232,7 @@ void ControlMgr_StartHoming(void) {
     if (Safety_IsEstopLatched()) {
         return;
     }
-    g_sync_state = SYNC_IDLE;
+    g_all_homed = false;
     Homing_StartParallel();
     g_mode = SYS_HOMING;
 }
@@ -469,104 +240,7 @@ void ControlMgr_StartHoming(void) {
 /* 中止回零 */
 void ControlMgr_AbortHoming(void) {
     Homing_Abort();
-    g_sync_state = SYNC_IDLE;
     g_mode = SYS_IDLE;
-}
-
-bool ControlMgr_StartSyncHome40(void) {
-    if (Safety_IsEstopLatched()) {
-        return false;
-    }
-
-    set_all_brake_commands();
-    sync_reset_loop_states();
-    Homing_StartParallel();
-    g_sync_state = SYNC_HOME40_HOMING;
-    g_sync_ref_len = SYNC_HOME40_LEN_MM;
-    g_sync_elapsed_s = 0.0f;
-    g_sync_ticks = 0u;
-    g_sync_settle_ticks = 0u;
-    g_sync_timeout_ticks = SYNC_FAIL_TIMEOUT_TICKS;
-    g_mode = SYS_SYNC_TEST;
-    return true;
-}
-
-bool ControlMgr_StartSyncExtend(float start_len, float end_len, float speed) {
-    uint32_t timeout_ticks;
-    float distance;
-    float run_ticks_f;
-
-    if (Safety_IsEstopLatched()) {
-        return false;
-    }
-    if (!len_in_range(start_len) || !len_in_range(end_len) || !speed_in_range(speed) || (end_len <= start_len)) {
-        return false;
-    }
-
-    if ((g_mode == SYS_HOMING) || (g_sync_state == SYNC_HOME40_HOMING)) {
-        Homing_Abort();
-    }
-
-    distance = end_len - start_len;
-    run_ticks_f = (distance / speed) / CTRL_TICK_DT_S;
-    if (run_ticks_f > (float)(SYNC_FAIL_TIMEOUT_TICKS - 500u)) {
-        return false;
-    }
-    timeout_ticks = (uint32_t)run_ticks_f + 500u;
-
-    g_sync_end_len = end_len;
-    g_sync_speed = speed;
-    sync_begin_common(SYNC_EXTEND, start_len, timeout_ticks);
-    return true;
-}
-
-bool ControlMgr_StartSyncSine(float center, float amp, float freq, float cycles) {
-    uint32_t timeout_ticks;
-    float max_speed;
-    float duration_s;
-
-    if (Safety_IsEstopLatched()) {
-        return false;
-    }
-    if ((amp <= 0.0f) || (freq <= 0.0f) || (cycles <= 0.0f)) {
-        return false;
-    }
-    if (!len_in_range(center - amp) || !len_in_range(center + amp)) {
-        return false;
-    }
-
-    max_speed = 2.0f * SYNC_PI * freq * amp;
-    if (max_speed > CTRL_SPEED_MAX_MM_S) {
-        return false;
-    }
-
-    duration_s = cycles / freq;
-    if (duration_s > ((float)SYNC_FAIL_TIMEOUT_TICKS * CTRL_TICK_DT_S - 5.0f)) {
-        return false;
-    }
-    timeout_ticks = (uint32_t)(duration_s / CTRL_TICK_DT_S) + 500u;
-
-    if ((g_mode == SYS_HOMING) || (g_sync_state == SYNC_HOME40_HOMING)) {
-        Homing_Abort();
-    }
-
-    g_sync_center = center;
-    g_sync_amp = amp;
-    g_sync_freq = freq;
-    g_sync_cycles = cycles;
-    sync_begin_common(SYNC_SINE, center, timeout_ticks);
-    return true;
-}
-
-void ControlMgr_StopSyncTest(void) {
-    if (g_sync_state == SYNC_HOME40_HOMING) {
-        Homing_Abort();
-    }
-    g_sync_state = SYNC_IDLE;
-    set_all_brake_commands();
-    if (g_mode == SYS_SYNC_TEST) {
-        g_mode = SYS_IDLE;
-    }
 }
 
 /* 软件复位 */
@@ -578,6 +252,19 @@ void ControlMgr_SetTargetPosAll(const float pos[CTRL_AXIS_NUM]) {
     for (i = 0; i < CTRL_AXIS_NUM; i++) {
         acts[i].target_pos = pos[i];
     }
+}
+
+bool ControlMgr_SetTargetLenAll(float len_mm) {
+    uint8_t i;
+
+    if (!len_in_range(len_mm)) {
+        return false;
+    }
+
+    for (i = 0; i < CTRL_AXIS_NUM; i++) {
+        acts[i].target_pos = len_mm - g_zero_len_mm[i];
+    }
+    return true;
 }
 
 /* 设置单轴目标位置 */
@@ -624,10 +311,9 @@ void ControlMgr_EnterManualTest(void) {
     if (Safety_IsEstopLatched()) {
         return;
     }
-    if ((g_mode == SYS_HOMING) || (g_sync_state == SYNC_HOME40_HOMING)) {
+    if (g_mode == SYS_HOMING) {
         Homing_Abort();
     }
-    g_sync_state = SYNC_IDLE;
     set_all_brake_commands();
     g_mode = SYS_MANUAL_TEST;
 }
@@ -662,10 +348,9 @@ void ControlMgr_StartTuneVel(uint8_t axis, float target_vel) {
         return;
     }
 
-    if ((g_mode == SYS_HOMING) || (g_sync_state == SYNC_HOME40_HOMING)) {
+    if (g_mode == SYS_HOMING) {
         Homing_Abort();
     }
-    g_sync_state = SYNC_IDLE;
 
     target_vel = clampf_local(target_vel, -CTRL_SPEED_MAX_MM_S, CTRL_SPEED_MAX_MM_S);
     g_tune_axis = axis;
@@ -685,10 +370,9 @@ void ControlMgr_StartTunePos(uint8_t axis, float target_pos) {
     if ((axis >= CTRL_AXIS_NUM) || Safety_IsEstopLatched()) {
         return;
     }
-    if ((g_mode == SYS_HOMING) || (g_sync_state == SYNC_HOME40_HOMING)) {
+    if (g_mode == SYS_HOMING) {
         Homing_Abort();
     }
-    g_sync_state = SYNC_IDLE;
 
     if (target_pos < 0.0f) {
         target_pos = 0.0f;
@@ -719,17 +403,7 @@ void ControlMgr_StopTune(void) {
 /* 获取当前调参轴（0~5） */
 uint8_t ControlMgr_GetTuneAxis(void) { return g_tune_axis; }
 
-bool ControlMgr_IsSyncTestActive(void) { return g_mode == SYS_SYNC_TEST; }
-
-uint8_t ControlMgr_GetSyncState(void) { return (uint8_t)g_sync_state; }
-
-float ControlMgr_GetSyncRefLen(void) { return g_sync_ref_len; }
-
-float ControlMgr_GetSyncMaxErr(void) { return g_sync_max_err; }
-
-float ControlMgr_GetSyncSpread(void) { return g_sync_spread; }
-
-float ControlMgr_GetAxisLenMm(uint8_t axis) { return axis_len_mm(axis); }
+bool ControlMgr_IsHomed(void) { return g_all_homed; }
 
 /* 读取当前系统模式 */
 SystemMode_e ControlMgr_GetMode(void) { return g_mode; }
