@@ -109,7 +109,7 @@ void Actuator_WriteOutput(Actuator_t *act, uint8_t in1, uint8_t in2, uint16_t pw
 void Actuator_SetBrakeCommand(Actuator_t *act);
 
 /**
- * @brief 阻塞式单轴手动回零（兼容旧流程）
+ * @brief 阻塞式单轴手动回零（维护测试用）
  * @param act      [in/out] 执行器对象指针
  * @param axis_idx [in] 轴号（0~5）
  * @return 无

@@ -185,7 +185,7 @@ void Actuator_ManualHome(Actuator_t *act, uint8_t axis_idx) {
     int16_t last_pulse = 0;
     uint16_t stall_count = 0;
 
-    printf("Axis %d Homing start...\r\n", axis_idx + 1u);
+    printf("DATA,ACTUATOR,HOME_START,axis=%u\r\n", (unsigned)(axis_idx + 1u));
 
     Actuator_WriteOutput(act, 0u, 1u, 3500u);
 
@@ -209,5 +209,5 @@ void Actuator_ManualHome(Actuator_t *act, uint8_t axis_idx) {
     Actuator_WriteOutput(act, 0u, 0u, 0u);
     Encoder_ResetPos(axis_idx);
 
-    printf("Axis %d Homing Done!\r\n", axis_idx + 1u);
+    printf("DATA,ACTUATOR,HOME_DONE_RAW,axis=%u\r\n", (unsigned)(axis_idx + 1u));
 }
