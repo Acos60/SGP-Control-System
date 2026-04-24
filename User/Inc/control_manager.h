@@ -91,6 +91,7 @@ bool ControlMgr_SetTargetLenAll(float len_mm);
  * @return 无
  */
 void ControlMgr_SetTargetPosAxis(uint8_t axis, float pos);
+bool ControlMgr_SetTargetLenAxis(uint8_t axis, float len_mm);
 
 /**
  * @brief 设置单轴 PID 与速度限幅参数

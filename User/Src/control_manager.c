@@ -267,6 +267,15 @@ bool ControlMgr_SetTargetLenAll(float len_mm) {
     return true;
 }
 
+bool ControlMgr_SetTargetLenAxis(uint8_t axis, float len_mm) {
+    if ((axis >= CTRL_AXIS_NUM) || !len_in_range(len_mm)) {
+        return false;
+    }
+
+    acts[axis].target_pos = len_mm - g_zero_len_mm[axis];
+    return true;
+}
+
 /* 设置单轴目标位置 */
 void ControlMgr_SetTargetPosAxis(uint8_t axis, float pos) {
     if (axis >= CTRL_AXIS_NUM) {

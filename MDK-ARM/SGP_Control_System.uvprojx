@@ -561,6 +561,11 @@
               <FilePath>..\User\Src\hwt901b.c</FilePath>
             </File>
             <File>
+              <FileName>imu_calibrator.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Src\imu_calibrator.c</FilePath>
+            </File>
+            <File>
               <FileName>wit_c_sdk.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Src\wit_c_sdk.c</FilePath>

@@ -19,6 +19,7 @@
 #include "control_manager.h"
 #include "encoder.h"
 #include "hwt901b.h"
+#include "imu_calibrator.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -104,6 +105,7 @@ int main(void)
   UART_Init_Receive();
   HWT901B_Init(&huart2);
   ControlMgr_Init();
+  ImuCal_Init();
 
   HAL_TIM_Base_Start_IT(&htim6);
   /* USER CODE END 2 */
@@ -114,6 +116,7 @@ int main(void)
   {
     UART_ProcessCommand();
     HWT901B_Process();
+    ImuCal_Tick();
     // ControlMgr_MainTask();
     /* USER CODE END WHILE */
 

@@ -4,6 +4,7 @@
 #include "encoder.h"
 #include "homing_manager.h"
 #include "hwt901b.h"
+#include "imu_calibrator.h"
 #include "safety_manager.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -376,13 +377,20 @@ static void print_all_pid_data(void) {
 
 static void print_imu_data(void) {
     HWT901B_Data_t imu;
+    float raw[3];
+    float cal[3];
+    bool cal_valid;
 
     HWT901B_GetData(&imu);
-    printf("DATA,IMU,online=%u,age=%lu,roll=%.3f,pitch=%.3f,yaw=%.3f,gx=%.3f,gy=%.3f,gz=%.3f,ax=%.3f,ay=%.3f,az=%.3f,temp=%.2f,mag=%d/%d/%d,flags=0x%X\r\n",
+    raw[0] = imu.angle_deg[0];
+    raw[1] = imu.angle_deg[1];
+    raw[2] = imu.angle_deg[2];
+    cal_valid = ImuCal_ApplyToAngles(raw, cal);
+    printf("DATA,IMU,online=%u,age=%lu,roll=%.3f,pitch=%.3f,yaw=%.3f,roll_cal=%.3f,pitch_cal=%.3f,yaw_cal=%.3f,cal_valid=%u,gx=%.3f,gy=%.3f,gz=%.3f,ax=%.3f,ay=%.3f,az=%.3f,temp=%.2f,mag=%d/%d/%d,flags=0x%X\r\n",
            (unsigned)imu.online, (unsigned long)(HAL_GetTick() - imu.last_update_ms), imu.angle_deg[0],
-           imu.angle_deg[1], imu.angle_deg[2], imu.gyro_dps[0], imu.gyro_dps[1], imu.gyro_dps[2], imu.acc_g[0],
-           imu.acc_g[1], imu.acc_g[2], imu.temperature_c, (int)imu.mag[0], (int)imu.mag[1], (int)imu.mag[2],
-           (unsigned)imu.update_flags);
+           imu.angle_deg[1], imu.angle_deg[2], cal[0], cal[1], cal[2], cal_valid ? 1u : 0u, imu.gyro_dps[0],
+           imu.gyro_dps[1], imu.gyro_dps[2], imu.acc_g[0], imu.acc_g[1], imu.acc_g[2], imu.temperature_c,
+           (int)imu.mag[0], (int)imu.mag[1], (int)imu.mag[2], (unsigned)imu.update_flags);
 }
 
 static void print_imu_status(void) {
@@ -488,6 +496,50 @@ static bool process_new_command(const char *cmd) {
     }
     if (strcmp(cmd, "IMU CAL MAG STOP") == 0) {
         print_imu_result("CAL_MAG_STOP", HWT901B_StopMagCali());
+        return true;
+    }
+
+    if (strcmp(cmd, "CAL QUICK") == 0) {
+        if (ImuCal_StartQuick()) {
+            printf("OK,CAL,QUICK\r\n");
+        } else {
+            printf("ERR,CAL,BUSY\r\n");
+        }
+        return true;
+    }
+    if (strcmp(cmd, "CAL FULL") == 0) {
+        if (ImuCal_StartFull()) {
+            printf("OK,CAL,FULL\r\n");
+        } else {
+            printf("ERR,CAL,BUSY\r\n");
+        }
+        return true;
+    }
+    if (strcmp(cmd, "CAL STATUS?") == 0) {
+        ImuCal_PrintStatus();
+        return true;
+    }
+    if (strcmp(cmd, "CAL REPORT?") == 0) {
+        ImuCal_PrintReport();
+        return true;
+    }
+    if (strcmp(cmd, "CAL ABORT") == 0) {
+        ImuCal_Abort();
+        printf("OK,CAL,ABORT\r\n");
+        return true;
+    }
+    if (strcmp(cmd, "CAL MON OFF") == 0) {
+        ImuCal_DisableMonitor();
+        printf("OK,CAL,MON_OFF\r\n");
+        return true;
+    }
+    if (strncmp(cmd, "CAL MON,", 8) == 0) {
+        if (sscanf(cmd + 8, "%u", &period_ms) == 1) {
+            ImuCal_EnableMonitor(clamp_period_ms(period_ms));
+            printf("OK,CAL,MON,%u\r\n", (unsigned)clamp_period_ms(period_ms));
+        } else {
+            printf("ERR,CAL,MON_PARAM\r\n");
+        }
         return true;
     }
 
